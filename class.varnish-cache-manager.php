@@ -3,8 +3,10 @@
 class ClpVarnishCacheManager {
 
     private $cache_settings = [];
-    private $static_asset_lifetime = 2592000; // 30 days for static assets
-    private $default_lifetime = 3600; // 1 hour default
+    private $static_asset_lifetime = 604800; // 1 week for static assets
+    private $default_lifetime = 7200; // 2 hours default
+    private $homepage_lifetime = 3600; // 1 hour for homepage
+    private $product_lifetime = 14400; // 4 hours for products
 
     public function is_enabled() {
         $settings = $this->get_cache_settings();
@@ -24,6 +26,16 @@ class ClpVarnishCacheManager {
     public function get_static_asset_lifetime() {
         $settings = $this->get_cache_settings();
         return (isset($settings['staticAssetLifetime']) ? $settings['staticAssetLifetime'] : $this->static_asset_lifetime);
+    }
+
+    public function get_homepage_lifetime() {
+        $settings = $this->get_cache_settings();
+        return (isset($settings['homepageLifetime']) ? $settings['homepageLifetime'] : $this->homepage_lifetime);
+    }
+
+    public function get_product_lifetime() {
+        $settings = $this->get_cache_settings();
+        return (isset($settings['productLifetime']) ? $settings['productLifetime'] : $this->product_lifetime);
     }
 
     public function get_cache_tag_prefix() {
@@ -109,32 +121,38 @@ class ClpVarnishCacheManager {
                 }
             }
 
-            // Add cache control headers based on file type
+            // Set cache times based on URL pattern
             $headers = [
                 'Host' => $host,
                 'X-Cache-Debug' => '1',
-                'X-Cache-Control' => 'public',
                 'X-Cache-Status' => 'MISS'
             ];
 
-            // Set cache times based on file type
-            $ext = pathinfo($parsed_url['path'], PATHINFO_EXTENSION);
-            $static_assets = ['css', 'js', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'woff', 'woff2'];
-            
-            if (in_array($ext, $static_assets)) {
+            // Homepage
+            if ($path == '/' || $path == '/index.php') {
+                $ttl = $this->get_homepage_lifetime();
+                $headers['Cache-Control'] = 'public, max-age=' . $ttl;
+                $headers['X-Cache-TTL'] = $ttl;
+            }
+            // Product pages
+            elseif (strpos($path, '/product/') === 0) {
+                $ttl = $this->get_product_lifetime();
+                $headers['Cache-Control'] = 'public, max-age=' . $ttl;
+                $headers['X-Cache-TTL'] = $ttl;
+            }
+            // Static assets
+            elseif (preg_match('/\.(css|js|jpg|jpeg|png|gif|ico|pdf|doc|docx|ppt|pptx|woff|woff2)$/', $path)) {
                 $ttl = $this->get_static_asset_lifetime();
                 $headers['Cache-Control'] = 'public, max-age=' . $ttl;
                 $headers['X-Cache-TTL'] = $ttl;
-            } else {
+            }
+            // Default cache time
+            else {
                 $ttl = $this->get_cache_lifetime();
                 $headers['Cache-Control'] = 'public, max-age=' . $ttl;
                 $headers['X-Cache-TTL'] = $ttl;
             }
 
-            // Add Varnish specific headers
-            $headers['X-Varnish-Cache'] = '1';
-            $headers['X-Varnish-Debug'] = '1';
-            
             $this->purge($headers, $request_url);
         } else {
             throw new \Exception(sprintf('Not a valid url: %s', $url));
@@ -148,7 +166,6 @@ class ClpVarnishCacheManager {
             }
             $request_url = sprintf('http://%s', $request_url);
 
-            // Add standard Varnish debug headers
             $headers['X-Varnish-Debug'] = '1';
             $headers['X-Cache-Debug'] = '1';
             
@@ -167,19 +184,8 @@ class ClpVarnishCacheManager {
                 $http_status_code = $response['response']['code'];
             }
 
-            // Get cache status headers
-            $cache_status = wp_remote_retrieve_header($response, 'X-Cache');
-            $cache_hits = wp_remote_retrieve_header($response, 'X-Cache-Hits');
-            $age = wp_remote_retrieve_header($response, 'Age');
-            
             if ($http_status_code != 200) {
-                throw new \Exception(sprintf(
-                    'HTTP Status: %s, Cache Status: %s, Cache Hits: %s, Age: %s', 
-                    $http_status_code, 
-                    $cache_status ?: 'unknown', 
-                    $cache_hits ?: '0',
-                    $age ?: '0'
-                ));
+                throw new \Exception(sprintf('HTTP Status Code: %d', $http_status_code));
             }
 
         } catch (\Exception $e) {
@@ -189,30 +195,41 @@ class ClpVarnishCacheManager {
         }
     }
 
-    // Add this function to handle response headers
     public function add_cache_headers() {
         if (!$this->is_enabled()) {
             return;
         }
 
-        // Get current URL path
-        $path = $_SERVER['REQUEST_URI'];
-        $ext = pathinfo($path, PATHINFO_EXTENSION);
-        
-        // Set appropriate cache headers based on file type
-        $static_assets = ['css', 'js', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'woff', 'woff2'];
-        
-        if (in_array($ext, $static_assets)) {
-            $ttl = $this->get_static_asset_lifetime();
-            header('Cache-Control: public, max-age=' . $ttl);
-            header('X-Cache-TTL: ' . $ttl);
-        } else {
-            $ttl = $this->get_cache_lifetime();
-            header('Cache-Control: public, max-age=' . $ttl);
-            header('X-Cache-TTL: ' . $ttl);
+        // Check if WooCommerce functions exist before using them
+        $is_woo_page = false;
+        if (function_exists('is_cart') && function_exists('is_checkout') && function_exists('is_account_page')) {
+            $is_woo_page = is_cart() || is_checkout() || is_account_page();
         }
 
-        // Add debug headers
+        // Don't cache admin, login, or WooCommerce pages
+        if (
+            is_admin() ||
+            is_user_logged_in() ||
+            $is_woo_page ||
+            (function_exists('is_product') && is_product())
+        ) {
+            nocache_headers();
+            return;
+        }
+
+        $ttl = $this->get_cache_lifetime();
+
+        // Set different cache times based on content type
+        if (is_front_page() || is_home()) {
+            $ttl = $this->get_homepage_lifetime();
+        } elseif (function_exists('is_product') && is_product() || is_single()) {
+            $ttl = $this->get_product_lifetime();
+        } elseif (preg_match('/\.(css|js|jpg|jpeg|png|gif|ico|pdf|doc|docx|ppt|pptx|woff|woff2)$/', $_SERVER['REQUEST_URI'])) {
+            $ttl = $this->get_static_asset_lifetime();
+        }
+
+        header('Cache-Control: public, max-age=' . $ttl);
+        header('X-Cache-TTL: ' . $ttl);
         header('X-Varnish-Cache: 1');
         header('X-Cache-Debug: 1');
         header('X-Varnish-Debug: 1');
