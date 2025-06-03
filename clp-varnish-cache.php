@@ -13,7 +13,7 @@
  * GitHub Branch: master
  */
 
-if (false ===  function_exists('add_action')) {
+if (false === function_exists('add_action')) {
     echo 'Hi there!  I\'m just a plugin, not much I can do when called directly.';
     exit;
 }
@@ -22,8 +22,13 @@ define('CLP_VARNISH_VERSION', '1.0.2');
 $is_admin = is_admin();
 
 if (true === $is_admin) {
-    define('CLP_VARNISH_PLUGIN_DIR', plugin_dir_path( __FILE__));
+    define('CLP_VARNISH_PLUGIN_DIR', plugin_dir_path(__FILE__));
     require_once CLP_VARNISH_PLUGIN_DIR . 'class.varnish-cache-manager.php';
     require_once CLP_VARNISH_PLUGIN_DIR . 'class.varnish-cache-admin.php';
     $clp_varnish_cache_admin = new ClpVarnishCacheAdmin();
+} else {
+    // Add cache headers for non-admin requests
+    require_once plugin_dir_path(__FILE__) . 'class.varnish-cache-manager.php';
+    $clp_varnish_cache = new ClpVarnishCacheManager();
+    add_action('init', array($clp_varnish_cache, 'add_cache_headers'));
 }
